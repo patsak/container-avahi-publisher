@@ -1,6 +1,6 @@
 module github.com/privezentsev/container-avahi-publisher
 
-go 1.25.0
+go 1.25.2
 
 require (
 	github.com/docker/docker v27.3.1+incompatible
