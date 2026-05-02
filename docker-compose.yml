@@ -1,0 +1,21 @@
+services:
+  avahi-publisher:
+    build: .
+    restart: unless-stopped
+    volumes:
+      # Docker socket (read-only)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Host D-Bus socket so the daemon can reach Avahi
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+    environment:
+      # Override if your D-Bus socket is at a non-standard path
+      - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
+
+# Example service that gets published via mDNS:
+#
+#   myapp:
+#     image: nginx
+#     labels:
+#       mdns.host: myapp          # resolves as myapp.local
+#       # or
+#       mdns.host: myapp.local    # explicit .local suffix, same result
