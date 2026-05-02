@@ -3,19 +3,30 @@ services:
     build: .
     restart: unless-stopped
     volumes:
-      # Docker socket (read-only)
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Host D-Bus socket so the daemon can reach Avahi
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
-    environment:
-      # Override if your D-Bus socket is at a non-standard path
-      - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 
-# Example service that gets published via mDNS:
+# Label reference:
+#
+#   mdns.host: myapp
+#     → CNAME myapp.local → <host mDNS FQDN>
+#       resolves to the host IP via the host's existing A record
+#       multiple containers may share the same alias without collision
+#
+#   mdns.host: myapp, myapp-alias
+#     → multiple CNAME aliases, comma-separated
+#
+#   mdns.host.container: myapp-internal
+#     → A record myapp-internal.local → container IP
+#
+#   Both labels can be set on the same container simultaneously.
+#
+# Example:
 #
 #   myapp:
 #     image: nginx
+#     ports:
+#       - "8080:80"
 #     labels:
-#       mdns.host: myapp          # resolves as myapp.local
-#       # or
-#       mdns.host: myapp.local    # explicit .local suffix, same result
+#       mdns.host: myapp, myapp-alias         # CNAME → host
+#       mdns.host.container: myapp-c, myapp2  # A record → container IP
