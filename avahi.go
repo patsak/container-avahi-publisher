@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -14,6 +15,11 @@ const (
 	avahiServerPath      = dbus.ObjectPath("/")
 	avahiServerIface     = "org.freedesktop.Avahi.Server"
 	avahiEntryGroupIface = "org.freedesktop.Avahi.EntryGroup"
+
+	dbusIface                  = "org.freedesktop.DBus"
+	dbusPath                   = dbus.ObjectPath("/org/freedesktop/DBus")
+	dbusMemberNameOwnerChanged = "NameOwnerChanged"
+	dbusSignalNameOwnerChanged = dbusIface + "." + dbusMemberNameOwnerChanged
 
 	avahiIfUnspec    = int32(-1)
 	avahiProtoUnspec = int32(-1)
@@ -193,6 +199,86 @@ func (a *avahiClient) Close() {
 		rec.group.Call(avahiEntryGroupIface+".Free", 0)
 	}
 	a.conn.Close()
+}
+
+// avahiNameOwnerChangedMatch is a D-Bus match rule for Avahi appearing on the bus
+// (initial claim or after daemon restart).
+func avahiNameOwnerChangedMatch() string {
+	return fmt.Sprintf(
+		"type='signal',interface='%s',member='%s',path='%s',arg0='%s'",
+		dbusIface, dbusMemberNameOwnerChanged, dbusPath, avahiBusName,
+	)
+}
+
+// resetRegistrationsAfterDaemonRestart clears in-memory registration state.
+// Old EntryGroup proxies are dropped without Free: after a daemon restart the
+// remote objects no longer exist.
+func (a *avahiClient) resetRegistrationsAfterDaemonRestart() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.records = make(map[string]*hostRecord)
+	a.containers = make(map[string][]string)
+}
+
+// refreshHostFQDN reloads the host FQDN from Avahi (e.g. after reconnect).
+func (a *avahiClient) refreshHostFQDN() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var hostFQDN string
+	if err := a.server.Call(avahiServerIface+".GetHostNameFqdn", 0).Store(&hostFQDN); err != nil {
+		return fmt.Errorf("get host FQDN: %w", err)
+	}
+	hostFQDN = strings.TrimSuffix(hostFQDN, ".")
+	a.hostFQDN = hostFQDN
+	log.Printf("avahi: refreshed host FQDN: %s", hostFQDN)
+	return nil
+}
+
+// WatchAvahiRestarts republishes via onRepublish whenever Avahi claims its bus
+// name again (including after `systemctl restart avahi-daemon`).
+func (a *avahiClient) WatchAvahiRestarts(ctx context.Context, onRepublish func() error) {
+	go func() {
+		match := avahiNameOwnerChangedMatch()
+		bus := a.conn.BusObject()
+		if err := bus.Call(dbusIface+".AddMatch", 0, match).Store(); err != nil {
+			log.Printf("avahi: D-Bus AddMatch for NameOwnerChanged: %v", err)
+			return
+		}
+		defer func() {
+			_ = bus.Call(dbusIface+".RemoveMatch", 0, match).Store()
+		}()
+
+		ch := make(chan *dbus.Signal, 32)
+		a.conn.Signal(ch)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case sig, ok := <-ch:
+				if !ok {
+					return
+				}
+				if sig == nil || sig.Name != dbusSignalNameOwnerChanged || sig.Body == nil || len(sig.Body) < 3 {
+					continue
+				}
+				name, _ := sig.Body[0].(string)
+				newOwner, _ := sig.Body[2].(string)
+				if name != avahiBusName || newOwner == "" {
+					continue
+				}
+				log.Println("avahi: daemon (re)claimed bus name, republishing mDNS registrations")
+				a.resetRegistrationsAfterDaemonRestart()
+				if err := a.refreshHostFQDN(); err != nil {
+					log.Printf("avahi: refresh host FQDN after restart: %v", err)
+					continue
+				}
+				if err := onRepublish(); err != nil {
+					log.Printf("avahi: republish from Docker state: %v", err)
+				}
+			}
+		}
+	}()
 }
 
 // encodeDNSName encodes a hostname into DNS wire format (RFC 1035 §3.1).

@@ -34,6 +34,9 @@ func (w *watcher) Start(ctx context.Context) error {
 	if err := w.syncRunning(ctx); err != nil {
 		return fmt.Errorf("initial sync: %w", err)
 	}
+	w.avahi.WatchAvahiRestarts(ctx, func() error {
+		return w.syncRunning(ctx)
+	})
 	go w.watchEvents(ctx)
 	return nil
 }
